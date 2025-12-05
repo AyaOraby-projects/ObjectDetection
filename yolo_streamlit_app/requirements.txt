@@ -2,11 +2,3 @@ streamlit
 ultralytics
 pillow
 opencv-python-headless
-```
-
-### 3. Your Project Structure Should Be:
-```
-your-project/
-├── app.py
-├── requirements.txt
-└── packages.txt  ← Make sure this file exists!
