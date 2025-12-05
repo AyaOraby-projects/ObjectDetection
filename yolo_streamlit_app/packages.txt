@@ -1,18 +1,7 @@
-libgl1-mesa-glx
+
+ffmpeg
+libsm6
+libxext6
+libxrender-dev
+libgomp1
 libglib2.0-0
-```
-
-This file tells Streamlit Cloud to install the necessary system-level dependencies.
-
-## Why This Happens
-
-- **`opencv-python`**: Regular OpenCV package that includes GUI functionality and requires display libraries
-- **`opencv-python-headless`**: Stripped-down version without GUI components, perfect for servers
-- **System libraries**: Even the headless version needs some base graphics libraries, which `packages.txt` provides
-
-## Your Final File Structure
-```
-your-project/
-├── app.py
-├── requirements.txt  (with opencv-python-headless)
-└── packages.txt      (new file with system dependencies)
