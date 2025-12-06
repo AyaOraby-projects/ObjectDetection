@@ -1,224 +1,95 @@
 import streamlit as st
 import os
 import time
-import sys
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-
-# Try to import cv2 with fallback
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError as e:
-    st.warning(f"OpenCV import warning: {e}")
-    CV2_AVAILABLE = False
-    # Try to install missing package
-    try:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless==4.9.0.80"])
-        import cv2
-        CV2_AVAILABLE = True
-        st.success("Successfully installed OpenCV!")
-    except:
-        pass
+import tempfile
 
 # -------------------------
-# App UI
+# App UI Configuration
 # -------------------------
-st.set_page_config(page_title="YOLOv8 Object Detection", layout="centered")
-st.title("🟡 YOLOv8 Object Detection")
-
-st.markdown(
-    """
-Upload an image and the app will run YOLOv8 (yolov8n) detector and show the output image with bounding boxes.
-"""
+st.set_page_config(
+    page_title="YOLOv8 Object Detection",
+    page_icon="🟡",
+    layout="wide"
 )
 
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        text-align: center;
+        padding: 1rem 0;
+    }
+    .stButton>button {
+        width: 100%;
+        margin-top: 1rem;
+    }
+    .result-box {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background-color: #f0f2f6;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # -------------------------
-# Load model (cached) - with better error handling
+# Header
+# -------------------------
+st.markdown('<div class="main-header">', unsafe_allow_html=True)
+st.title("🟡 YOLOv8 Object Detection")
+st.markdown("""
+Upload an image and the app will run YOLOv8 (yolov8n) detector 
+and show the output image with bounding boxes.
+""")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------
+# Load Model (Cached) - Fixed Version
 # -------------------------
 @st.cache_resource
 def load_model():
     try:
-        # Import here to catch errors
+        # Set environment variable to avoid OpenCV GUI issues
+        os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
+        
+        # Import ultralytics
         from ultralytics import YOLO
         import torch
         
-        # Check if CUDA is available
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        st.sidebar.info(f"Using device: {device.upper()}")
-        
         # Load model
-        model = YOLO("yolov8n.pt")
-        model.to(device)
+        st.info("📥 Downloading YOLOv8n model (if not already cached)...")
+        model = YOLO('yolov8n.pt')
+        
+        # Test the model with a simple prediction
+        test_image = Image.new('RGB', (640, 480), color='white')
+        test_array = np.array(test_image)
+        _ = model(test_array, verbose=False)
+        
+        st.success("✅ Model loaded successfully!")
         return model
+        
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        st.info("Make sure requirements.txt includes: ultralytics, opencv-python-headless")
-        return None
-
-model = None
-with st.spinner("Loading YOLOv8 model..."):
-    model = load_model()
-
-if model is None:
-    st.error("Model failed to load. Check the logs for details.")
-    st.stop()
+        st.error(f"❌ Error loading model: {str(e)}")
+        st.info("💡 Trying alternative loading method...")
+        
+        # Alternative loading method
+        try:
+            from ultralytics import YOLO
+            model = YOLO('yolov8n.pt')
+            return model
+        except Exception as e2:
+            st.error(f"❌ Alternative loading also failed: {str(e2)}")
+            return None
 
 # -------------------------
-# File uploader
+# Sidebar Configuration
 # -------------------------
-uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "bmp", "webp"])
-
-if uploaded_file is not None:
-    # Read and show uploaded image
-    input_image = Image.open(uploaded_file).convert("RGB")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Input Image")
-        st.image(input_image, use_container_width=True)
-    
-    # Convert PIL to numpy array for processing
-    img_array = np.array(input_image)
-    
-    # Create temp directory
-    temp_input_dir = "temp_inputs"
-    os.makedirs(temp_input_dir, exist_ok=True)
-    
-    # Save input temporarily
-    timestamp = int(time.time())
-    input_path = os.path.join(temp_input_dir, f"input_{timestamp}.jpg")
-    input_image.save(input_path, format="JPEG", quality=95)
-
-    # Clear previous runs if they exist
-    out_root = "runs/detect"
-    if os.path.exists(out_root):
-        try:
-            import shutil
-            shutil.rmtree(out_root)
-        except:
-            pass
-
-    # Run detection
-    with st.spinner("Running YOLOv8 detection..."):
-        try:
-            # Run prediction with optimized settings for Streamlit Cloud
-            results = model.predict(
-                source=img_array,  # Use numpy array directly
-                save=False,  # Don't save to disk by default
-                save_txt=False,
-                save_conf=True,
-                conf=0.25,  # Confidence threshold
-                iou=0.45,   # NMS IoU threshold
-                max_det=300, # Maximum detections per image
-                device='cpu'  # Force CPU to avoid CUDA issues in cloud
-            )
-            
-            # Process results
-            if results and len(results) > 0:
-                result = results[0]
-                
-                # Get annotated image
-                annotated_array = result.plot()  # Returns BGR numpy array
-                
-                # Convert BGR to RGB for PIL
-                if CV2_AVAILABLE:
-                    annotated_array_rgb = cv2.cvtColor(annotated_array, cv2.COLOR_BGR2RGB)
-                else:
-                    # Fallback if cv2 not available
-                    annotated_array_rgb = annotated_array[:, :, ::-1]  # Simple BGR to RGB
-                
-                # Convert to PIL Image
-                output_image = Image.fromarray(annotated_array_rgb)
-                
-                # Save output
-                output_path = os.path.join(temp_input_dir, f"output_{timestamp}.jpg")
-                output_image.save(output_path, format="JPEG", quality=95)
-                
-                # Display output
-                with col2:
-                    st.subheader("Detected Output")
-                    st.image(output_image, use_container_width=True)
-                
-                # Show detection statistics
-                st.success(f"✅ Detection complete!")
-                
-                # Count detections
-                if hasattr(result, 'boxes') and result.boxes is not None:
-                    num_detections = len(result.boxes)
-                    st.info(f"**Detected objects:** {num_detections}")
-                    
-                    # Show class distribution
-                    if num_detections > 0:
-                        with st.expander("📊 View Detailed Results", expanded=True):
-                            class_names = result.names
-                            detected_classes = {}
-                            
-                            for box in result.boxes:
-                                class_id = int(box.cls[0])
-                                class_name = class_names[class_id]
-                                confidence = float(box.conf[0])
-                                
-                                if class_name not in detected_classes:
-                                    detected_classes[class_name] = {
-                                        'count': 0,
-                                        'confidences': []
-                                    }
-                                
-                                detected_classes[class_name]['count'] += 1
-                                detected_classes[class_name]['confidences'].append(confidence)
-                            
-                            # Display as table
-                            if detected_classes:
-                                st.markdown("### Detection Summary")
-                                for class_name, data in detected_classes.items():
-                                    avg_conf = sum(data['confidences']) / len(data['confidences'])
-                                    st.write(f"**{class_name}**: {data['count']} objects (avg confidence: {avg_conf:.1%})")
-                
-                # Download button
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Download Result",
-                        data=f,
-                        file_name=f"yolov8_detection_{timestamp}.jpg",
-                        mime="image/jpeg",
-                        key=f"download_{timestamp}"
-                    )
-            else:
-                st.warning("No objects detected. Try adjusting the confidence threshold.")
-                
-        except Exception as e:
-            st.error(f"Detection error: {str(e)}")
-            st.info("If this is a CUDA error, try running on CPU by modifying the device parameter.")
-    
-    # Clean up temporary files
-    try:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-    except:
-        pass
-
-# Sidebar information
 with st.sidebar:
-    st.markdown("### About")
-    st.markdown("""
-    This app uses YOLOv8n (nano version) for object detection.
+    st.header("⚙️ Settings")
     
-    **Model details:**
-    - 80 COCO classes
-    - Real-time inference
-    - Optimized for cloud deployment
-    
-    **Tips:**
-    - Upload clear images for best results
-    - Supported formats: JPG, PNG, BMP, WebP
-    - Detection works best with multiple objects
-    """)
-    
-    # Confidence threshold slider
-    st.markdown("### Settings")
-    conf_threshold = st.slider(
+    confidence_threshold = st.slider(
         "Confidence Threshold",
         min_value=0.1,
         max_value=0.9,
@@ -226,3 +97,264 @@ with st.sidebar:
         step=0.05,
         help="Higher values = fewer but more confident detections"
     )
+    
+    iou_threshold = st.slider(
+        "IOU Threshold",
+        min_value=0.1,
+        max_value=0.9,
+        value=0.45,
+        step=0.05,
+        help="Non-maximum suppression threshold"
+    )
+    
+    st.markdown("---")
+    st.markdown("### 📊 Model Info")
+    st.markdown("""
+    **YOLOv8n (Nano)**
+    - 80 COCO classes
+    - Real-time detection
+    - Optimized for speed
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 💡 Tips")
+    st.markdown("""
+    1. Upload clear images
+    2. Adjust confidence for better results
+    3. Try different images for varied objects
+    """)
+
+# -------------------------
+# Initialize Model
+# -------------------------
+if 'model' not in st.session_state:
+    with st.spinner("🚀 Loading YOLOv8 model..."):
+        model = load_model()
+        if model is not None:
+            st.session_state.model = model
+            st.rerun()
+        else:
+            st.error("Failed to load model. Please check the logs.")
+            st.stop()
+
+# Get model from session state
+model = st.session_state.model
+
+# -------------------------
+# File Uploader
+# -------------------------
+st.markdown("---")
+st.subheader("📤 Upload Image")
+
+uploaded_file = st.file_uploader(
+    "Choose an image...",
+    type=["jpg", "jpeg", "png", "bmp", "webp"],
+    help="Supported formats: JPG, PNG, BMP, WebP"
+)
+
+# -------------------------
+# Processing Function
+# -------------------------
+def draw_bounding_boxes(image, boxes, class_names, colors=None):
+    """Draw bounding boxes on image without OpenCV"""
+    draw = ImageDraw.Draw(image)
+    
+    # Create a simple color palette
+    if colors is None:
+        # Generate distinct colors for different classes
+        import random
+        random.seed(42)
+        colors = {}
+        for class_id in range(len(class_names)):
+            colors[class_id] = (
+                random.randint(50, 255),
+                random.randint(50, 255),
+                random.randint(50, 255)
+            )
+    
+    # Try to use a font, fallback to default if not available
+    try:
+        font = ImageFont.truetype("Arial", size=14)
+    except:
+        font = ImageFont.load_default()
+    
+    for box in boxes:
+        # Get box coordinates
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        class_id = int(box.cls[0].cpu().numpy())
+        confidence = float(box.conf[0].cpu().numpy())
+        
+        # Get class info
+        class_name = class_names[class_id]
+        color = colors[class_id]
+        
+        # Draw rectangle
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        
+        # Draw label background
+        label = f"{class_name} {confidence:.2f}"
+        text_bbox = draw.textbbox((x1, y1), label, font=font)
+        draw.rectangle(text_bbox, fill=color)
+        
+        # Draw text
+        draw.text((x1, y1), label, fill=(255, 255, 255), font=font)
+    
+    return image
+
+# -------------------------
+# Main Processing
+# -------------------------
+if uploaded_file is not None:
+    # Create two columns for display
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Load and display original image
+        original_image = Image.open(uploaded_file).convert("RGB")
+        st.subheader("📷 Original Image")
+        st.image(original_image, use_container_width=True, caption=f"Size: {original_image.size}")
+    
+    with col2:
+        # Convert to numpy array for YOLO
+        img_array = np.array(original_image)
+        
+        with st.spinner("🔍 Detecting objects..."):
+            try:
+                # Run inference
+                results = model(
+                    img_array,
+                    conf=confidence_threshold,
+                    iou=iou_threshold,
+                    verbose=False,
+                    device='cpu'  # Force CPU to avoid any CUDA issues
+                )
+                
+                # Process results
+                if results and len(results) > 0:
+                    result = results[0]
+                    
+                    # Create a copy for drawing
+                    annotated_image = original_image.copy()
+                    
+                    # Check if we have detections
+                    if hasattr(result, 'boxes') and result.boxes is not None and len(result.boxes) > 0:
+                        # Draw bounding boxes
+                        annotated_image = draw_bounding_boxes(
+                            annotated_image,
+                            result.boxes,
+                            result.names
+                        )
+                        
+                        # Display annotated image
+                        st.subheader("🎯 Detected Objects")
+                        st.image(annotated_image, use_container_width=True)
+                        
+                        # Statistics
+                        num_detections = len(result.boxes)
+                        st.markdown(f"### ✅ Found {num_detections} objects")
+                        
+                        # Detailed results in expander
+                        with st.expander("📊 View Detailed Detection Results", expanded=True):
+                            # Count objects by class
+                            class_counts = {}
+                            confidences_by_class = {}
+                            
+                            for box in result.boxes:
+                                class_id = int(box.cls[0].cpu().numpy())
+                                class_name = result.names[class_id]
+                                confidence = float(box.conf[0].cpu().numpy())
+                                
+                                if class_name not in class_counts:
+                                    class_counts[class_name] = 0
+                                    confidences_by_class[class_name] = []
+                                
+                                class_counts[class_name] += 1
+                                confidences_by_class[class_name].append(confidence)
+                            
+                            # Display summary
+                            for class_name, count in sorted(class_counts.items()):
+                                avg_conf = np.mean(confidences_by_class[class_name])
+                                st.write(f"**{class_name}**: {count} objects (avg confidence: {avg_conf:.1%})")
+                        
+                        # Download button for results
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                            annotated_image.save(tmp_file.name, format='JPEG', quality=95)
+                            tmp_file_path = tmp_file.name
+                        
+                        with open(tmp_file_path, 'rb') as f:
+                            st.download_button(
+                                label="📥 Download Annotated Image",
+                                data=f,
+                                file_name=f"yolov8_detection_{int(time.time())}.jpg",
+                                mime="image/jpeg"
+                            )
+                        
+                        # Clean up temp file
+                        try:
+                            os.unlink(tmp_file_path)
+                        except:
+                            pass
+                        
+                    else:
+                        st.warning("⚠️ No objects detected. Try lowering the confidence threshold.")
+                        st.image(original_image, use_container_width=True, caption="No objects detected")
+                
+                else:
+                    st.error("❌ No results returned from model")
+                    
+            except Exception as e:
+                st.error(f"❌ Error during detection: {str(e)}")
+                st.info("💡 If this is an OpenCV error, try the following:")
+                st.code("""
+                # In your terminal:
+                pip uninstall opencv-python opencv-python-headless -y
+                pip install ultralytics pillow numpy
+                """)
+
+# -------------------------
+# Footer
+# -------------------------
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #666; padding: 1rem;">
+    <p>Powered by YOLOv8 | Built with Streamlit</p>
+    <p>No OpenCV required! Uses pure Python with Pillow for visualization.</p>
+</div>
+""", unsafe_allow_html=True)
+
+# -------------------------
+# Troubleshooting Section (Hidden by default)
+# -------------------------
+with st.expander("🔧 Troubleshooting"):
+    st.markdown("""
+    ### Common Issues and Solutions:
+    
+    1. **Model loading fails**
+       - Check internet connection for model download
+       - Ensure you have write permissions
+       
+    2. **Slow performance**
+       - Use smaller images
+       - The app runs on CPU in cloud environments
+       
+    3. **Memory issues**
+       - Upload smaller images
+       - Close other browser tabs
+       
+    4. **No objects detected**
+       - Lower the confidence threshold
+       - Try images with clear, visible objects
+       
+    ### For Local Development:
+    ```bash
+    # Create virtual environment
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\\Scripts\\activate
+    
+    # Install requirements
+    pip install streamlit ultralytics pillow numpy
+    
+    # Run the app
+    streamlit run app.py
+    ```
+    """)
