@@ -1,7 +1,26 @@
 import streamlit as st
 import os
 import time
-import shutil
+import sys
+from PIL import Image
+import numpy as np
+
+# Try to import cv2 with fallback
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError as e:
+    st.warning(f"OpenCV import warning: {e}")
+    CV2_AVAILABLE = False
+    # Try to install missing package
+    try:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "opencv-python-headless==4.9.0.80"])
+        import cv2
+        CV2_AVAILABLE = True
+        st.success("Successfully installed OpenCV!")
+    except:
+        pass
 
 # -------------------------
 # App UI
@@ -16,14 +35,22 @@ Upload an image and the app will run YOLOv8 (yolov8n) detector and show the outp
 )
 
 # -------------------------
-# Load model (cached) - with error handling
+# Load model (cached) - with better error handling
 # -------------------------
 @st.cache_resource
 def load_model():
     try:
         # Import here to catch errors
         from ultralytics import YOLO
+        import torch
+        
+        # Check if CUDA is available
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        st.sidebar.info(f"Using device: {device.upper()}")
+        
+        # Load model
         model = YOLO("yolov8n.pt")
+        model.to(device)
         return model
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
@@ -41,16 +68,20 @@ if model is None:
 # -------------------------
 # File uploader
 # -------------------------
-uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "bmp"])
+uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "bmp", "webp"])
 
 if uploaded_file is not None:
     # Read and show uploaded image
-    from PIL import Image
-    
     input_image = Image.open(uploaded_file).convert("RGB")
-    st.subheader("Input Image")
-    st.image(input_image, use_container_width=True)
-
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Input Image")
+        st.image(input_image, use_container_width=True)
+    
+    # Convert PIL to numpy array for processing
+    img_array = np.array(input_image)
+    
     # Create temp directory
     temp_input_dir = "temp_inputs"
     os.makedirs(temp_input_dir, exist_ok=True)
@@ -60,118 +91,138 @@ if uploaded_file is not None:
     input_path = os.path.join(temp_input_dir, f"input_{timestamp}.jpg")
     input_image.save(input_path, format="JPEG", quality=95)
 
-    # Clear previous runs
+    # Clear previous runs if they exist
     out_root = "runs/detect"
     if os.path.exists(out_root):
         try:
+            import shutil
             shutil.rmtree(out_root)
         except:
             pass
 
     # Run detection
-    with st.spinner("Running detection..."):
+    with st.spinner("Running YOLOv8 detection..."):
         try:
-            # Run prediction
-            results = model.predict(input_path, save=True, save_txt=False, save_conf=True)
+            # Run prediction with optimized settings for Streamlit Cloud
+            results = model.predict(
+                source=img_array,  # Use numpy array directly
+                save=False,  # Don't save to disk by default
+                save_txt=False,
+                save_conf=True,
+                conf=0.25,  # Confidence threshold
+                iou=0.45,   # NMS IoU threshold
+                max_det=300, # Maximum detections per image
+                device='cpu'  # Force CPU to avoid CUDA issues in cloud
+            )
+            
+            # Process results
+            if results and len(results) > 0:
+                result = results[0]
+                
+                # Get annotated image
+                annotated_array = result.plot()  # Returns BGR numpy array
+                
+                # Convert BGR to RGB for PIL
+                if CV2_AVAILABLE:
+                    annotated_array_rgb = cv2.cvtColor(annotated_array, cv2.COLOR_BGR2RGB)
+                else:
+                    # Fallback if cv2 not available
+                    annotated_array_rgb = annotated_array[:, :, ::-1]  # Simple BGR to RGB
+                
+                # Convert to PIL Image
+                output_image = Image.fromarray(annotated_array_rgb)
+                
+                # Save output
+                output_path = os.path.join(temp_input_dir, f"output_{timestamp}.jpg")
+                output_image.save(output_path, format="JPEG", quality=95)
+                
+                # Display output
+                with col2:
+                    st.subheader("Detected Output")
+                    st.image(output_image, use_container_width=True)
+                
+                # Show detection statistics
+                st.success(f"✅ Detection complete!")
+                
+                # Count detections
+                if hasattr(result, 'boxes') and result.boxes is not None:
+                    num_detections = len(result.boxes)
+                    st.info(f"**Detected objects:** {num_detections}")
+                    
+                    # Show class distribution
+                    if num_detections > 0:
+                        with st.expander("📊 View Detailed Results", expanded=True):
+                            class_names = result.names
+                            detected_classes = {}
+                            
+                            for box in result.boxes:
+                                class_id = int(box.cls[0])
+                                class_name = class_names[class_id]
+                                confidence = float(box.conf[0])
+                                
+                                if class_name not in detected_classes:
+                                    detected_classes[class_name] = {
+                                        'count': 0,
+                                        'confidences': []
+                                    }
+                                
+                                detected_classes[class_name]['count'] += 1
+                                detected_classes[class_name]['confidences'].append(confidence)
+                            
+                            # Display as table
+                            if detected_classes:
+                                st.markdown("### Detection Summary")
+                                for class_name, data in detected_classes.items():
+                                    avg_conf = sum(data['confidences']) / len(data['confidences'])
+                                    st.write(f"**{class_name}**: {data['count']} objects (avg confidence: {avg_conf:.1%})")
+                
+                # Download button
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download Result",
+                        data=f,
+                        file_name=f"yolov8_detection_{timestamp}.jpg",
+                        mime="image/jpeg",
+                        key=f"download_{timestamp}"
+                    )
+            else:
+                st.warning("No objects detected. Try adjusting the confidence threshold.")
+                
         except Exception as e:
             st.error(f"Detection error: {str(e)}")
-            st.stop()
-
-    # Find the output image
-    output_image_path = None
+            st.info("If this is a CUDA error, try running on CPU by modifying the device parameter.")
     
-    # Method 1: Check runs/detect directory
-    if os.path.exists("runs/detect"):
-        # Find all prediction directories
-        for root, dirs, files in os.walk("runs/detect"):
-            for file in files:
-                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    # Check if this looks like our input file
-                    if f"input_{timestamp}" in file or "input_" in file:
-                        output_image_path = os.path.join(root, file)
-                        break
-            if output_image_path:
-                break
-    
-    # Method 2: If not found, look for any image file
-    if output_image_path is None and os.path.exists("runs/detect"):
-        for root, dirs, files in os.walk("runs/detect"):
-            for file in files:
-                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    output_image_path = os.path.join(root, file)
-                    break
-            if output_image_path:
-                break
-    
-    # Method 3: Use results directly (fallback)
-    if output_image_path is None:
-        try:
-            # Process results directly
-            import cv2
-            import numpy as np
-            
-            # Get the annotated image from results
-            result = results[0]
-            annotated_img = result.plot()  # Get numpy array
-            
-            # Convert to PIL Image
-            annotated_img_rgb = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
-            output_image = Image.fromarray(annotated_img_rgb)
-            
-            # Save it
-            output_image_path = os.path.join(temp_input_dir, f"output_{timestamp}.jpg")
-            output_image.save(output_image_path, format="JPEG", quality=95)
-            
-            st.success("Processed using direct results!")
-        except Exception as e:
-            st.error(f"Could not process results: {str(e)}")
+    # Clean up temporary files
+    try:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+    except:
+        pass
 
-    # Show results
-    if output_image_path and os.path.exists(output_image_path):
-        st.subheader("Detected Output")
-        st.image(output_image_path, use_container_width=True)
-
-        # Download button
-        with open(output_image_path, "rb") as f:
-            st.download_button(
-                label="📥 Download Result",
-                data=f,
-                file_name=f"detected_{timestamp}.jpg",
-                mime="image/jpeg",
-            )
-        
-        # Show detection info
-        try:
-            result = results[0]
-            if hasattr(result, 'boxes') and result.boxes is not None:
-                num_detections = len(result.boxes)
-                st.info(f"✅ Detected **{num_detections}** objects")
-                
-                # Show class distribution
-                if num_detections > 0:
-                    with st.expander("📊 View detailed results"):
-                        class_names = result.names
-                        detected_classes = {}
-                        
-                        for box in result.boxes:
-                            class_id = int(box.cls[0])
-                            class_name = class_names[class_id]
-                            confidence = float(box.conf[0])
-                            
-                            if class_name not in detected_classes:
-                                detected_classes[class_name] = {
-                                    'count': 0,
-                                    'confidences': []
-                                }
-                            
-                            detected_classes[class_name]['count'] += 1
-                            detected_classes[class_name]['confidences'].append(confidence)
-                        
-                        # Display table
-                        for class_name, data in detected_classes.items():
-                            avg_conf = sum(data['confidences']) / len(data['confidences'])
-                            st.write(f"**{class_name}**: {data['count']} objects (avg confidence: {avg_conf:.2%})")
-        except:
-            pass  # Skip stats if there's an error
-    else:
-        st.error("Could not generate output image.")
+# Sidebar information
+with st.sidebar:
+    st.markdown("### About")
+    st.markdown("""
+    This app uses YOLOv8n (nano version) for object detection.
+    
+    **Model details:**
+    - 80 COCO classes
+    - Real-time inference
+    - Optimized for cloud deployment
+    
+    **Tips:**
+    - Upload clear images for best results
+    - Supported formats: JPG, PNG, BMP, WebP
+    - Detection works best with multiple objects
+    """)
+    
+    # Confidence threshold slider
+    st.markdown("### Settings")
+    conf_threshold = st.slider(
+        "Confidence Threshold",
+        min_value=0.1,
+        max_value=0.9,
+        value=0.25,
+        step=0.05,
+        help="Higher values = fewer but more confident detections"
+    )
